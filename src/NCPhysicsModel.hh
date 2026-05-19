@@ -9,6 +9,8 @@
 
 namespace NCPluginNamespace {
 
+  enum class Recipe { cls, std, lux };
+
   //We implement the actual physics model in this completely custom C++ helper
   //class. That decouples it from NCrystal interfaces (which is nice in case the
   //NCrystal API changes at some point), and it makes it easy to directly
@@ -39,6 +41,7 @@ namespace NCPluginNamespace {
     CrystallineExtinction( bool has_extinction,
                            int model_option, double l, double Gg,
                            int tilt_dist_option, double L,
+                           Recipe recipe,
                            bool has_texture,
                            const NCrystal::Vector& preferred_orientation1, double R1, double f1,
                            const NCrystal::Vector& preferred_orientation2, double R2, double f2,
@@ -61,6 +64,7 @@ namespace NCPluginNamespace {
     double m_Gg;
     int m_tilt_dist_option;
     double m_L;
+    Recipe m_recipe;
     bool m_has_texture;
     NCrystal::Vector m_preferred_orientation1;
     double m_R1;

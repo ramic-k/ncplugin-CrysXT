@@ -13,6 +13,8 @@
 //        Vol. C, Chapter 6.4, pp. 609-616.                                   //
 //        P. Becker & P. Coppens, Acta Cryst. (1974). A30, 129.              //
 //        P. Becker & P. Coppens, Acta Cryst. (1995). A51, 662-667.          //
+//        T. Kittelmann et al., Acta Cryst. (2026). A82, 163-178.            //
+//        https://doi.org/10.1107/S2053273326001245                           //
 //                                                                            //
 //  Texture model:                                                            //
 //    Modified March-Dollase preferred orientation distribution function       //
@@ -27,6 +29,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "NCPhysicsModel.hh"
+#include "NCbc2025.hh"
 
 //Include various utilities from NCrystal's internal header files:
 #include "NCrystal/internal/utils/NCString.hh"
@@ -275,7 +278,7 @@ namespace NCPluginNamespace {
     }
 
     double BC_pure_extn_mdl( double Nc, double wl, double F_hkl, double l,
-                             double d_hkl, double g, double L, int tilt_dist ) {
+                             double d_hkl, double g, double L, int tilt_dist, Recipe recipe ) {
 
       //Calculation of pure primary or secondary extinction factor y using the model of Becker & Coppens
       // pure primary:  BC_pure  l
@@ -303,10 +306,16 @@ namespace NCPluginNamespace {
         double y;
         //pure primary extinction
         if ( l > 0. && g == 0. && L == 0. ) {
-          ABpair AB_theta = calc_AB_theta( cos_2theta, 0 );
           //double x = 2. / 3. * Q_theta * l * l * sin_2theta / wl;
           double x = 2. / 3. * Q_theta * l * l / wl;
-          y = 1. / std::sqrt(1. + 2. * x + AB_theta.A * NC::ncsquare(x) / (1. + AB_theta.B * x));
+          if ( recipe == Recipe::cls ) {
+            ABpair AB_theta = calc_AB_theta( cos_2theta, 0 );
+            y = 1. / std::sqrt(1. + 2. * x + AB_theta.A * NC::ncsquare(x) / (1. + AB_theta.B * x));
+          } else if ( recipe == Recipe::std ) {
+            y = bc2025_y_primary( x, sin_theta );
+          } else {
+            y = bc2025_y_primary_lux( x, sin_theta );
+          }
         }
         //pure secondary extinction type-I
         else if ( l == 0. && g > 0. && L > 0. ) {
@@ -321,10 +330,20 @@ namespace NCPluginNamespace {
         }
         //pure secondary extinction type-II
         else if ( l > 0. && g == 0. && L > 0. ) {
-          ABpair AB_theta = calc_AB_theta( cos_2theta, tilt_dist );
           //double x = 2. / 3. * Q_theta * L * l * sin_2theta / wl;
           double x = 2. / 3. * Q_theta * L * l / wl;
-          y = 1. / std::sqrt(1. + 2.12 * x + AB_theta.A * NC::ncsquare(x) / (1. + AB_theta.B * x));
+          if ( recipe == Recipe::cls ) {
+            ABpair AB_theta = calc_AB_theta( cos_2theta, tilt_dist );
+            y = 1. / std::sqrt(1. + 2.12 * x + AB_theta.A * NC::ncsquare(x) / (1. + AB_theta.B * x));
+          } else if ( recipe == Recipe::std ) {
+            if      ( tilt_dist == 1 ) y = bc2025_y_scndgauss(   x, sin_theta );
+            else if ( tilt_dist == 2 ) y = bc2025_y_scndlorentz(  x, sin_theta );
+            else                       y = bc2025_y_scndfresnel(   x, sin_theta );
+          } else {
+            if      ( tilt_dist == 1 ) y = bc2025_y_scndgauss_lux(   x, sin_theta );
+            else if ( tilt_dist == 2 ) y = bc2025_y_scndlorentz_lux(  x, sin_theta );
+            else                       y = bc2025_y_scndfresnel_lux(   x, sin_theta );
+          }
         }
         else {
           y = 1.;
@@ -340,7 +359,7 @@ namespace NCPluginNamespace {
     }
 
     double BC_mix_extn_mdl( double Nc, double wl, double F_hkl, double l,
-                            double d_hkl, double g, double L, int tilt_dist ) {
+                            double d_hkl, double g, double L, int tilt_dist, Recipe recipe ) {
 
       //Calculation of mixed primary or secondary extinction factor y using the model of Becker & Coppens
       //Nc : number of unit cells per unit volume, Aa^-3
@@ -363,12 +382,18 @@ namespace NCPluginNamespace {
         double Q_theta = NC::ncsquare(Nc * wl * F_hkl) * wl; //division by sin_2theta to be done later
 
         //primary
-        ABpair AB_theta_p = calc_AB_theta( cos_2theta, 0 );
         //double xp = 2. / 3. * Q_theta * l * l * sin_2theta / wl;
         double xp = 2. / 3. * Q_theta * l * l / wl;
-        double yp = 1. / std::sqrt(1. + 2. * xp + AB_theta_p.A * NC::ncsquare(xp) / (1. + AB_theta_p.B * xp));
+        double yp;
+        if ( recipe == Recipe::cls ) {
+          ABpair AB_theta_p = calc_AB_theta( cos_2theta, 0 );
+          yp = 1. / std::sqrt(1. + 2. * xp + AB_theta_p.A * NC::ncsquare(xp) / (1. + AB_theta_p.B * xp));
+        } else if ( recipe == Recipe::std ) {
+          yp = bc2025_y_primary( xp, sin_theta );
+        } else {
+          yp = bc2025_y_primary_lux( xp, sin_theta );
+        }
 
-        ABpair AB_theta_s = calc_AB_theta( cos_2theta, tilt_dist );
         double xs, ys;
         if ( l < 1.e-9 ) {
           xs = 0.;
@@ -383,12 +408,23 @@ namespace NCPluginNamespace {
             xs = 2. / 3. * Q_theta * L / (wl / l + sin_2theta * 2. / (3. * g)); //Valid for Lorentzian distribution, Eq.41(b) in Acta Cryst. (1974). A30, 129
 		  }
           xs *= yp; //Correction of formula, ys also dependent on yp
-		  if ( tilt_dist == 1 ) {
-			ys = 1. / std::sqrt(1. + 2.12 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs)); //The factor 2.12 is only applied in the case of Gaussian distribution
-		  }
-		  else {
-            ys = 1. / std::sqrt(1. + 2 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs));
-		  }
+          if ( recipe == Recipe::cls ) {
+            ABpair AB_theta_s = calc_AB_theta( cos_2theta, tilt_dist );
+		    if ( tilt_dist == 1 ) {
+			  ys = 1. / std::sqrt(1. + 2.12 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs)); //The factor 2.12 is only applied in the case of Gaussian distribution
+		    }
+		    else {
+              ys = 1. / std::sqrt(1. + 2 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs));
+		    }
+          } else if ( recipe == Recipe::std ) {
+            if      ( tilt_dist == 1 ) ys = bc2025_y_scndgauss(   xs, sin_theta );
+            else if ( tilt_dist == 2 ) ys = bc2025_y_scndlorentz(  xs, sin_theta );
+            else                       ys = bc2025_y_scndfresnel(   xs, sin_theta );
+          } else {
+            if      ( tilt_dist == 1 ) ys = bc2025_y_scndgauss_lux(   xs, sin_theta );
+            else if ( tilt_dist == 2 ) ys = bc2025_y_scndlorentz_lux(  xs, sin_theta );
+            else                       ys = bc2025_y_scndfresnel_lux(   xs, sin_theta );
+          }
         }
 
         return yp * ys;
@@ -400,7 +436,7 @@ namespace NCPluginNamespace {
     }
 
     double BC_mod_extn_mdl( double Nc, double wl, double F_hkl, double l,
-                            double d_hkl, double g, double L, int tilt_dist ) {
+                            double d_hkl, double g, double L, int tilt_dist, Recipe recipe ) {
 
       //Calculation of mixed primary or secondary extinction factor y using the MODIFIED model of Becker & Coppens
       //Only SECONDARY extinction can happen, but is characterized by l and g
@@ -424,13 +460,11 @@ namespace NCPluginNamespace {
         double Q_theta = NC::ncsquare(Nc * wl * F_hkl) * wl; //division by sin_2theta to be done later
 
         //primary
-        ABpair AB_theta_p = calc_AB_theta( cos_2theta, 0 );
         //double xp = 2. / 3. * Q_theta * l * l * sin_2theta / wl;
         //double xp = 2. / 3. * Q_theta * l * l / wl;
         //double yp = 1. / std::sqrt(1. + 2. * xp + AB_theta_p.A * NC::ncsquare(xp) / (1. + AB_theta_p.B * xp));
         double yp = 1.; //No primary extinction
 
-        ABpair AB_theta_s = calc_AB_theta( cos_2theta, tilt_dist );
         double xs, ys;
         if ( l < 1.e-9 ) {
           xs = 0.;
@@ -445,12 +479,23 @@ namespace NCPluginNamespace {
             xs = 2. / 3. * Q_theta * L / (wl / l + sin_2theta * 2. / (3. * g)); //Valid for Lorentzian distribution, Eq.41(b) in Acta Cryst. (1974). A30, 129
 		  }
           xs *= yp; //Correction of formula, ys also dependent on yp
-		  if ( tilt_dist == 1 ) {
-			ys = 1. / std::sqrt(1. + 2.12 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs)); //The factor 2.12 is only applied in the case of Gaussian distribution
-		  }
-		  else {
-            ys = 1. / std::sqrt(1. + 2 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs));
-		  }
+          if ( recipe == Recipe::cls ) {
+            ABpair AB_theta_s = calc_AB_theta( cos_2theta, tilt_dist );
+		    if ( tilt_dist == 1 ) {
+			  ys = 1. / std::sqrt(1. + 2.12 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs)); //The factor 2.12 is only applied in the case of Gaussian distribution
+		    }
+		    else {
+              ys = 1. / std::sqrt(1. + 2 * xs + AB_theta_s.A * NC::ncsquare(xs) / (1. + AB_theta_s.B * xs));
+		    }
+          } else if ( recipe == Recipe::std ) {
+            if      ( tilt_dist == 1 ) ys = bc2025_y_scndgauss(   xs, sin_theta );
+            else if ( tilt_dist == 2 ) ys = bc2025_y_scndlorentz(  xs, sin_theta );
+            else                       ys = bc2025_y_scndfresnel(   xs, sin_theta );
+          } else {
+            if      ( tilt_dist == 1 ) ys = bc2025_y_scndgauss_lux(   xs, sin_theta );
+            else if ( tilt_dist == 2 ) ys = bc2025_y_scndlorentz_lux(  xs, sin_theta );
+            else                       ys = bc2025_y_scndfresnel_lux(   xs, sin_theta );
+          }
         }
 
         return yp * ys;
@@ -531,6 +576,7 @@ NCP::CrystallineExtinction NCP::CrystallineExtinction::createFromInfo( const NC:
   int model_option     = 0;
   double l = 0., Gg = 0., L = 0.;
   int tilt_dist_option = 0;
+  Recipe recipe        = Recipe::std;
 
   NCrystal::Vector preferred_orientation1, preferred_orientation2;
   double R1 = 1., f1 = 1., R2 = 1., f2 = 0.;
@@ -547,9 +593,9 @@ NCP::CrystallineExtinction NCP::CrystallineExtinction::createFromInfo( const NC:
         NCRYSTAL_THROW2(BadInput,"Multiple Extinction lines in @CUSTOM_"<<pluginNameUpperCase()<<" are not allowed");
       has_extinction = true;
 
-      if ( line.size() != 5 && line.size() != 6 )
+      if ( line.size() < 5 || line.size() > 7 )
         NCRYSTAL_THROW2(BadInput,"Extinction line in @CUSTOM_"<<pluginNameUpperCase()
-                        <<" should have five or six entries (Extinction model l g L [dist])");
+                        <<" should have 5-7 entries (Extinction model l g L [dist] [rec=cls|std|lux])");
 
       if ( line.at(1).compare("Sabine_uncorr") == 0 ) {
         model_option = 0;
@@ -578,8 +624,11 @@ NCP::CrystallineExtinction NCP::CrystallineExtinction::createFromInfo( const NC:
              || ! (L  >= 0.0) )
         NCRYSTAL_THROW2( BadInput,"Invalid values in Extinction line: l, g and L should be non-negative." );
 
-      if ( model_option != 1 && line.size() != 6 )
-        NCRYSTAL_THROW2(BadInput,"Extinction line for this model requires a distribution keyword as sixth entry.");
+      if ( model_option == 0 && line.size() != 6 ) {
+        NCRYSTAL_THROW2(BadInput,"Extinction line for Sabine_uncorr requires exactly 6 entries (Extinction model l g L dist).");
+      } else if ( (model_option == 2 || model_option == 3 || model_option == 6) && line.size() != 6 && line.size() != 7 ) {
+        NCRYSTAL_THROW2(BadInput,"Extinction line for BC models requires 6 entries (with dist) or 7 entries (with dist and rec=cls|std|lux).");
+      }
 
       if ( model_option == 0 ) {
         if ( line.at(5).compare("rect") == 0 ) {
@@ -604,6 +653,21 @@ NCP::CrystallineExtinction NCP::CrystallineExtinction::createFromInfo( const NC:
         }
         else {
           NCRYSTAL_THROW2( BadInput,"Distribution option for BC models should be Gauss, Lorentz or Fresnel." );
+        }
+        if ( line.size() == 7 ) {
+          if ( line.at(6).compare("rec=cls") == 0 ) {
+            recipe = Recipe::cls;
+          }
+          else if ( line.at(6).compare("rec=std") == 0 ) {
+            recipe = Recipe::std;
+          }
+          else if ( line.at(6).compare("rec=lux") == 0 ) {
+            recipe = Recipe::lux;
+          }
+          else {
+            NCRYSTAL_THROW2( BadInput,"Invalid recipe option '"<<line.at(6)
+                             <<"'. Expected rec=cls, rec=std, or rec=lux." );
+          }
         }
       }
 
@@ -661,6 +725,7 @@ NCP::CrystallineExtinction NCP::CrystallineExtinction::createFromInfo( const NC:
   const NCrystal::StructureInfo& struct_info = info.getStructureInfo();
 
   return CrystallineExtinction( has_extinction, model_option, l, Gg, tilt_dist_option, L,
+                                recipe,
                                 has_texture, preferred_orientation1, R1, f1,
                                 preferred_orientation2, R2, f2,
                                 struct_info, plane_provider );
@@ -669,6 +734,7 @@ NCP::CrystallineExtinction NCP::CrystallineExtinction::createFromInfo( const NC:
 NCP::CrystallineExtinction::CrystallineExtinction( bool has_extinction,
                                                    int model_option, double l, double Gg,
                                                    int tilt_dist_option, double L,
+                                                   Recipe recipe,
                                                    bool has_texture,
                                                    const NCrystal::Vector& preferred_orientation1, double R1, double f1,
                                                    const NCrystal::Vector& preferred_orientation2, double R2, double f2,
@@ -680,6 +746,7 @@ NCP::CrystallineExtinction::CrystallineExtinction( bool has_extinction,
   m_Gg(Gg),
   m_tilt_dist_option(tilt_dist_option),
   m_L(L),
+  m_recipe(recipe),
   m_has_texture(has_texture),
   m_preferred_orientation1(preferred_orientation1),
   m_R1(R1),
@@ -735,13 +802,13 @@ double NCP::CrystallineExtinction::calcCrossSection( double neutron_ekin ) const
         E_hkl = corr_blk_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, mu, m_Gg, m_L );
       }
       else if ( m_model_option == 2 ) {
-        E_hkl = BC_pure_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option );
+        E_hkl = BC_pure_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       }
       else if ( m_model_option == 3 ) {
-        E_hkl = BC_mix_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option );
+        E_hkl = BC_mix_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       }
       else {
-        E_hkl = BC_mod_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option );
+        E_hkl = BC_mod_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       }
     }
 
@@ -789,13 +856,13 @@ NCP::CrystallineExtinction::ScatEvent NCP::CrystallineExtinction::sampleScatteri
         E_hkl = corr_blk_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, mu, m_Gg, m_L );
       }
       else if ( m_model_option == 2 ) {
-        E_hkl = BC_pure_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option );
+        E_hkl = BC_pure_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       }
       else if ( m_model_option == 3 ) {
-        E_hkl = BC_mix_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option );
+        E_hkl = BC_mix_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       }
       else {
-        E_hkl = BC_mod_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option );
+        E_hkl = BC_mod_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       }
     }
 
