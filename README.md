@@ -31,6 +31,47 @@ Append a `@CUSTOM_CRYSXT` section to any `.ncmat` file using the `Extinction` an
 - `Extinction <model> <l[Å]> <g[1/rad]> <L[Å]> [dist] [rec=cls|std|lux]` — see [ncplugin-CrysExtn](https://github.com/XuShuqi7/ncplugin-CrysExtn) for parameter details. `Sabine_corr` takes no `dist`; `Sabine_uncorr` uses `rect`/`tri`; BC models use `Gauss`/`Lorentz`/`Fresnel`. The optional `rec=` flag (BC models only, default `std`) selects the extinction recipe: `cls` = BC1974 classic formula, `std` = BC2025 standard precision, `lux` = BC2025 luxury precision.
 - `Texture <px> <py> <pz> <R> <f>` — exactly two lines required, with `f1 + f2 = 1`. See [ncplugin-CrysText](https://github.com/highness-eu/ncplugin-CrysText) for details on the modified March-Dollase model.
 
-## Note
+## Monte Carlo use (texture)
 
-This plugin is intended for cross-section calculations only and not for use in Monte Carlo simulations.
+The texture model now supports **Monte-Carlo scattering** when the material is used as
+an **oriented** single crystal (i.e. an orientation is supplied in the cfg via
+`dir1`/`dir2`, as for any oriented NCrystal crystal). In that case the textured
+coherent-elastic process is **anisotropic**: the cross section depends on the incident
+neutron direction relative to the lab-fixed texture axis, and the scattering azimuth
+around each Debye–Scherrer cone is sampled from the modified March-Dollase pole density.
+This is the physically correct treatment for a textured (fibre/plate) polycrystal.
+
+Example (texture axis [111] placed along the +x lab axis):
+
+```
+Fe_sg229_CrysXT.ncmat;dcutoff=0.5;mos=0.0005deg;dir1=@crys_hkl:1,1,1@lab:1,0,0;dir2=@crys_hkl:1,-1,0@lab:0,1,0
+```
+
+If the material is **not** oriented, the texture cross section is the orientation-
+averaged value (equivalent to a beam parallel to the texture axis) and the scattering is
+sampled isotropically — appropriate for cross-section/transmission use but not for a
+direction-resolved MC.
+
+**Extinction** needs no special MC treatment. It is a per-reflection *scalar* magnitude
+reduction (`E_hkl ≤ 1`, isotropic, independent of sample orientation): it lowers the
+strength of each Bragg edge but does not alter the scattering-angle distribution, so the
+effective cross section the Monte-Carlo code already transports is correct. The plugin
+weights hkl selection by `strength·E_hkl`, consistent with the extinction-reduced cross
+section. This was verified by an extinction-only uncollided transmission in OpenMC
+(MPI, 1e8 neutrons): the MC-extracted Σ matches the analytic extinction-reduced cross
+section to ~0.3%, and at the strongly-extinguished (110) edge tracks the reduced curve
+(not the kinematic peak) to <1%.
+
+The texture sampler has been validated to reproduce: the orientation-averaged cross
+section equal to the powder cross section (texture conserves the angle-integrated total);
+the beam-parallel-to-axis cross section equal to the previous (cross-section-only) value;
+and the sampled Debye-cone azimuth distribution equal to the March-Dollase pole density.
+
+## Performance
+
+The non-oriented (isotropic) cross section is tabulated at construction on an edge-aware
+energy grid, so each `crossSection` query is a binary search plus interpolation rather than
+a per-reflection Bragg sum (the energy-integrated cross section is preserved to <0.001%;
+scattering sampling still uses the exact per-reflection weights). The oriented (single-crystal)
+path is direction-dependent and keeps its per-reflection evaluation with a Bragg-cutoff
+early-exit.

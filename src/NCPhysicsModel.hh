@@ -5,6 +5,7 @@
                                           //public API headers, sets up
                                           //namespaces and aliases)
 #include "NCrystal/internal/utils/NCVector.hh"
+#include "NCrystal/internal/utils/NCRotMatrix.hh"
 #include "NCrystal/internal/extd_utils/NCPlaneProvider.hh"
 
 namespace NCPluginNamespace {
@@ -48,6 +49,8 @@ namespace NCPluginNamespace {
                            const NCrystal::StructureInfo& struct_info,
                            NC::PlaneProvider * plane_provider );
 
+    bool hasTexture() const { return m_has_texture; }
+
     //Provide cross sections for a given neutron:
     double calcCrossSection( double neutron_ekin ) const;
 
@@ -56,7 +59,29 @@ namespace NCPluginNamespace {
     struct ScatEvent { double ekin_final, mu; };
     ScatEvent sampleScatteringEvent( NC::RNG& rng, double neutron_ekin ) const;
 
+    //--- Anisotropic (oriented) texture path: MC-correct direction-dependent ---
+    //  Enabled when the material is oriented (setOrientation called by the factory
+    //  with the crystal->lab rotation). The textured coherent-elastic cross section
+    //  then depends on the incident direction relative to the lab-fixed texture
+    //  axis, and the scattering azimuth on each Debye cone is sampled from the
+    //  modified March-Dollase pole density (model B). See NCTextureBragg notes.
+    void setOrientation( const NCrystal::RotMatrix& crystal2lab );
+    bool isOriented() const { return m_oriented; }
+
+    double calcCrossSectionDir( double neutron_ekin, const NCrystal::Vector& indir ) const;
+
+    struct ScatEventDir { double ekin_final; NCrystal::Vector outdir; };
+    ScatEventDir sampleScatteringEventDir( NC::RNG& rng, double neutron_ekin,
+                                           const NCrystal::Vector& indir ) const;
+
   private:
+    //Cone-averaged textured pole density (texture factor) of plane i for an
+    //incident lab direction, at wavelength wl; and the per-plane pole density at a
+    //specific scattering-vector direction Qhat (lab). Both fold the (one or two)
+    //March-Dollase components with weights f1,f2.
+    double textureFactorDir( std::size_t iplane, const NCrystal::Vector& indir,
+                             double wl ) const;
+    double poleDensityAtQ( std::size_t iplane, const NCrystal::Vector& Qhat ) const;
     //Data members:
     bool m_has_extinction;
     int m_model_option;
@@ -79,8 +104,42 @@ namespace NCPluginNamespace {
       double d_hkl;
       double strength;
       double F_hkl;
+      double cosA1 = 0.0, cosA2 = 0.0;     //precomputed cos(axis,normal) per component (#4)
+      std::vector<double> texP;            //tabulated f-weighted texture factor vs sin(theta) (#1)
     };
     std::vector<HKLPlane> m_hklPlanes;
+
+    //Texture-factor table: P(sin_theta) on a uniform grid sin_theta in [0,1], built once
+    //at construction so the runtime cross section is a table lookup, not an integral (#1).
+    static constexpr int NSINT = 1025;
+    double textureFactorTab( const HKLPlane& e, double wl ) const;
+
+    //Non-oriented total cross-section tabulation: an edge-aware grid of g(E)=xs(E)*E
+    //built once at construction, so the (isotropic) calcCrossSection is a binary-search +
+    //linear interpolation instead of a per-plane Bragg sum. This is O(log Ngrid) at ALL
+    //energies, eliminating the O(Nplanes) cost in the epithermal regime where every plane
+    //is Bragg-active. g=xs*E is used (not xs) because it is flat-1/E-free: it varies only
+    //through the smooth texture/extinction factors within each inter-edge segment and
+    //steps only at the Bragg edges (which become exact grid points), so linear
+    //interpolation is essentially exact. The exact per-plane path is retained for
+    //scattering-event sampling (which needs the per-plane weights) and for building the
+    //table itself.
+    double calcCrossSectionExact( double neutron_ekin ) const;
+    void buildXSTable();
+    std::vector<double> m_xsTabE;   //sorted neutron_ekin grid [eV]
+    std::vector<double> m_xsTabG;   //g = xs*ekin at each grid point [barn*eV]
+
+    //Oriented-texture state (set by setOrientation):
+    bool m_oriented = false;
+    NCrystal::Vector m_axis1_lab, m_axis2_lab;        //texture axes in lab frame (unit)
+    std::vector<NCrystal::Vector> m_normal_lab;       //per-plane reflection normal in lab (unit)
+
+    //2-D table of the modified-March-Dollase pole density md_pole_density(cosBetaQ,cosAlpha)
+    //per component, precomputed at construction so the oriented (anisotropic) path is a
+    //bilinear lookup instead of a per-evaluation chi-integral (#6).
+    static constexpr int NBQ = 257, NAL = 129;
+    std::vector<double> m_poleTab1, m_poleTab2;
+    double poleTabInterp( const std::vector<double>& tab, double cosBetaQ, double cosAlpha ) const;
   };
   using PhysicsModel = CrystallineExtinction;
 
