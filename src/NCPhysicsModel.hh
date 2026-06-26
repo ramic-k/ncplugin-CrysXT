@@ -114,6 +114,21 @@ namespace NCPluginNamespace {
     static constexpr int NSINT = 1025;
     double textureFactorTab( const HKLPlane& e, double wl ) const;
 
+    //Non-oriented total cross-section tabulation: an edge-aware grid of g(E)=xs(E)*E
+    //built once at construction, so the (isotropic) calcCrossSection is a binary-search +
+    //linear interpolation instead of a per-plane Bragg sum. This is O(log Ngrid) at ALL
+    //energies, eliminating the O(Nplanes) cost in the epithermal regime where every plane
+    //is Bragg-active. g=xs*E is used (not xs) because it is flat-1/E-free: it varies only
+    //through the smooth texture/extinction factors within each inter-edge segment and
+    //steps only at the Bragg edges (which become exact grid points), so linear
+    //interpolation is essentially exact. The exact per-plane path is retained for
+    //scattering-event sampling (which needs the per-plane weights) and for building the
+    //table itself.
+    double calcCrossSectionExact( double neutron_ekin ) const;
+    void buildXSTable();
+    std::vector<double> m_xsTabE;   //sorted neutron_ekin grid [eV]
+    std::vector<double> m_xsTabG;   //g = xs*ekin at each grid point [barn*eV]
+
     //Oriented-texture state (set by setOrientation):
     bool m_oriented = false;
     NCrystal::Vector m_axis1_lab, m_axis2_lab;        //texture axes in lab frame (unit)

@@ -833,6 +833,11 @@ NCP::CrystallineExtinction::CrystallineExtinction( bool has_extinction,
       }
     }
   }
+
+  //Build the non-oriented total cross-section table (must be last: needs the per-plane
+  //texP / cosA data above). Only the isotropic calcCrossSection uses it; the oriented
+  //path is direction-dependent and keeps its per-plane evaluation.
+  buildXSTable();
 }
 
 double NCP::CrystallineExtinction::poleTabInterp( const std::vector<double>& tab,
@@ -861,7 +866,7 @@ double NCP::CrystallineExtinction::textureFactorTab( const HKLPlane& e, double w
   return e.texP[j] * ( 1.0 - t ) + e.texP[j+1] * t;
 }
 
-double NCP::CrystallineExtinction::calcCrossSection( double neutron_ekin ) const {
+double NCP::CrystallineExtinction::calcCrossSectionExact( double neutron_ekin ) const {
 
   double xs_in_barns = 0.0;
   const double wl    = NC::ekin2wl( neutron_ekin );
@@ -900,6 +905,96 @@ double NCP::CrystallineExtinction::calcCrossSection( double neutron_ekin ) const
   return xs_in_barns;
 }
 
+void NCP::CrystallineExtinction::buildXSTable()
+{
+  //Build the edge-aware g(E)=xs*E grid used by the tabulated calcCrossSection (see header).
+  m_xsTabE.clear();
+  m_xsTabG.clear();
+  if ( m_hklPlanes.empty() )
+    return;
+
+  //Bragg edge energies (neutron_ekin at wl = 2*d_hkl). One per distinct d-spacing.
+  std::vector<double> edges;
+  edges.reserve( m_hklPlanes.size() );
+  for ( const auto& e : m_hklPlanes )
+    edges.push_back( NC::wl2ekin( 2.0 * e.d_hkl ) );
+  std::sort( edges.begin(), edges.end() );
+  edges.erase( std::unique( edges.begin(), edges.end(),
+                            []( double a, double b ){ return std::abs(a-b) <= 1e-9*std::abs(b); } ),
+               edges.end() );
+
+  const double Elo = edges.front();
+  //Cover the whole epithermal tail; beyond Ehi the cross section is in its asymptotic 1/E
+  //regime (all planes active, texture factor -> forward value) and is extrapolated as g/E.
+  const double Ehi = std::max( edges.back() * 1000.0, 1.0e4 );
+
+  //Base log-spaced grid (dense enough that linear interpolation of the smooth g between
+  //Bragg edges is essentially exact) merged with two straddle points around every edge so
+  //the Bragg step is represented sharply (lower point excludes the opening plane, upper
+  //includes it).
+  std::vector<double> grid;
+  const double llo = std::log( Elo * ( 1.0 - 1e-6 ) );
+  const double lhi = std::log( Ehi );
+  const int ppd   = 150;                                   //grid points per decade
+  const int nbase = std::max( 64, int( ppd * ( lhi - llo ) / std::log(10.0) ) );
+  grid.reserve( nbase + 2 * edges.size() + 2 );
+  for ( int k = 0; k <= nbase; ++k )
+    grid.push_back( std::exp( llo + ( lhi - llo ) * k / nbase ) );
+  //Around every Bragg edge add a point just below (the opening plane still closed) and a
+  //geometric ladder just above it. The newly-opened reflection is at near-backscatter,
+  //where extinction is strongest, so with extinction the cross section rises steeply over
+  //the first few percent above the edge and needs fine post-edge sampling for linear
+  //interpolation to stay accurate (without extinction this region is smooth and the extra
+  //points are simply harmless).
+  for ( double Ee : edges ) {
+    grid.push_back( Ee * ( 1.0 - 1e-7 ) );
+    grid.push_back( Ee * ( 1.0 + 1e-7 ) );
+    for ( double delta = 1e-5; delta < 0.08; delta *= 1.5 )
+      grid.push_back( Ee * ( 1.0 + delta ) );
+  }
+  std::sort( grid.begin(), grid.end() );
+  grid.erase( std::unique( grid.begin(), grid.end(),
+                           []( double a, double b ){ return std::abs(a-b) <= 1e-12*std::abs(b); } ),
+              grid.end() );
+
+  m_xsTabE.reserve( grid.size() );
+  m_xsTabG.reserve( grid.size() );
+  for ( double E : grid ) {
+    m_xsTabE.push_back( E );
+    m_xsTabG.push_back( calcCrossSectionExact( E ) * E );
+  }
+
+  //calcCrossSection extrapolates above the grid as g_back/ekin, which assumes g has reached
+  //its asymptotic plateau at the top of the grid (above the highest Bragg edge all planes are
+  //active and the texture/extinction factors sit at their near-forward values, so g=xs*E is
+  //nearly constant and xs ~ 1/E). Ehi is set far above the highest edge so this holds with
+  //wide margin; assert the table top is flat to ~2% to make the invariant explicit and catch
+  //pathological correction parameters (assert is a no-op in release builds).
+  if ( m_xsTabG.size() >= 2 ) {
+    const double g_top = m_xsTabG.back();
+    const double g_prev = m_xsTabG[ m_xsTabG.size() - 2 ];
+    nc_assert( g_prev > 0.0 && std::abs( g_top / g_prev - 1.0 ) < 0.02 );
+  }
+}
+
+double NCP::CrystallineExtinction::calcCrossSection( double neutron_ekin ) const {
+  //Tabulated isotropic cross section: binary search + linear interpolation of g(E)=xs*E on
+  //the edge-aware grid, then divide by E. Falls back to the exact per-plane sum when the
+  //table is unavailable (e.g. no planes). The exact path is also used directly by
+  //sampleScatteringEvent (which needs the per-plane weights).
+  if ( m_xsTabE.empty() )
+    return calcCrossSectionExact( neutron_ekin );
+  if ( neutron_ekin <= m_xsTabE.front() )
+    return 0.0;                                    //below the first Bragg edge: no coherent-elastic
+  if ( neutron_ekin >= m_xsTabE.back() )
+    return m_xsTabG.back() / neutron_ekin;         //above the tabulated range: asymptotic 1/E
+  auto it = std::upper_bound( m_xsTabE.begin(), m_xsTabE.end(), neutron_ekin );
+  const std::size_t i = static_cast<std::size_t>( ( it - m_xsTabE.begin() ) - 1 );
+  const double e0 = m_xsTabE[i], e1 = m_xsTabE[i+1];
+  const double t  = ( neutron_ekin - e0 ) / ( e1 - e0 );
+  const double g  = m_xsTabG[i] * ( 1.0 - t ) + m_xsTabG[i+1] * t;
+  return g / neutron_ekin;
+}
 
 NCP::CrystallineExtinction::ScatEvent NCP::CrystallineExtinction::sampleScatteringEvent( NC::RNG& rng, double neutron_ekin ) const {
 
@@ -914,7 +1009,7 @@ NCP::CrystallineExtinction::ScatEvent NCP::CrystallineExtinction::sampleScatteri
   //Use the EXACT per-plane cross section here (not the tabulated calcCrossSection): the
   //inverse-CDF plane selection below accumulates the exact per-plane weights and must
   //normalise by their exact sum, otherwise the cumulative could over/undershoot 1.
-  const double xs   = calcCrossSection( neutron_ekin ) / ( 2. * wlsq );
+  const double xs   = calcCrossSectionExact( neutron_ekin ) / ( 2. * wlsq );
   const double mu   = 0.;
   const double rnd  = rng.generate();
 

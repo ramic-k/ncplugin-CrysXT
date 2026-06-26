@@ -66,3 +66,12 @@ The texture sampler has been validated to reproduce: the orientation-averaged cr
 section equal to the powder cross section (texture conserves the angle-integrated total);
 the beam-parallel-to-axis cross section equal to the previous (cross-section-only) value;
 and the sampled Debye-cone azimuth distribution equal to the March-Dollase pole density.
+
+## Performance
+
+The non-oriented (isotropic) cross section is tabulated at construction on an edge-aware
+energy grid, so each `crossSection` query is a binary search plus interpolation rather than
+a per-reflection Bragg sum (the energy-integrated cross section is preserved to <0.001%;
+scattering sampling still uses the exact per-reflection weights). The oriented (single-crystal)
+path is direction-dependent and keeps its per-reflection evaluation with a Bragg-cutoff
+early-exit.
