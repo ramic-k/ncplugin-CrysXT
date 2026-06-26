@@ -140,6 +140,34 @@ namespace NCPluginNamespace {
     static constexpr int NBQ = 257, NAL = 129;
     std::vector<double> m_poleTab1, m_poleTab2;
     double poleTabInterp( const std::vector<double>& tab, double cosBetaQ, double cosAlpha ) const;
+
+    //Oriented cross-section tabulation: because the texture is azimuthally symmetric about
+    //each axis, the oriented cross section depends ONLY on the angle gamma_i between the
+    //incident direction and texture axis i, so sigma(dir,E)=f1*sigma1(cos g1,E)+f2*sigma2(cos
+    //g2,E) with each sigma_i a 2-D function. At setOrientation we tabulate g_i=sigma_i*E on a
+    //(cos gamma, E) grid (E grid reused from m_xsTabE, edge-aware), making calcCrossSectionDir
+    //two bilinear lookups instead of a per-plane Debye-cone average -> O(1), ~as fast as the
+    //isotropic path. The exact per-plane path is kept for sampling and for building the table.
+    static constexpr int NGAM = 49;                   //cos(gamma) grid points in [-1,1]
+    std::vector<double> m_dirTab1, m_dirTab2;         //[NGAM * m_xsTabE.size()] of g=sigma_i*E
+    std::vector<double> m_nDotA1, m_nDotA2;           //per-plane |normal . axis_i| (oriented)
+    void buildOrientedXSTables();
+    double extinctionFactor( const HKLPlane& e, double wl ) const;
+    double calcCrossSectionDirExact( double neutron_ekin, const NCrystal::Vector& indir ) const;
+    double dirTabInterp( const std::vector<double>& tab, double cosGamma, double ekin ) const;
+
+    //3-D cone-average table G_i(cos gamma, sin theta, cos alpha) per component. The
+    //Debye-cone average of the pole density depends ONLY on these three scalars
+    //(cos gamma = dir.axis, sin theta = wl/2d, cos alpha = |normal.axis|), so tabulating it
+    //once turns the per-plane directional texture factor into a trilinear lookup. This makes
+    //both the oriented-xs table build (above) and the oriented sampler's plane selection cheap.
+    static constexpr int NCG = 33, NCT = 65, NCA = 49;
+    std::vector<double> m_coneTab1, m_coneTab2;       //[NCG*NCT*NCA] cone-avg pole density
+    void buildConeTables();
+    double coneAvgRaw( double cosGamma, double sinT, double cosAlpha,
+                       const std::vector<double>& tab, unsigned npsi ) const;
+    double coneTabInterp( const std::vector<double>& tab, double cosGamma, double sinT, double cosAlpha ) const;
+    double textureFactorDirFast( std::size_t iplane, const NCrystal::Vector& indir, double wl ) const;
   };
   using PhysicsModel = CrystallineExtinction;
 
