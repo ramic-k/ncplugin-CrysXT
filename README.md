@@ -69,9 +69,16 @@ and the sampled Debye-cone azimuth distribution equal to the March-Dollase pole 
 
 ## Performance
 
-The non-oriented (isotropic) cross section is tabulated at construction on an edge-aware
-energy grid, so each `crossSection` query is a binary search plus interpolation rather than
-a per-reflection Bragg sum (the energy-integrated cross section is preserved to <0.001%;
-scattering sampling still uses the exact per-reflection weights). The oriented (single-crystal)
-path is direction-dependent and keeps its per-reflection evaluation with a Bragg-cutoff
-early-exit.
+Both the non-oriented and the oriented textured cross sections are tabulated at construction, so a
+`crossSection` query is an interpolation rather than a per-reflection Bragg sum.
+
+The **non-oriented** (isotropic) cross section uses an edge-aware energy table of `g(E)=xs·E` (the
+energy-integrated cross section is preserved to <0.001%; scattering sampling still uses the exact
+per-reflection weights).
+
+The **oriented** (single-crystal) cross section depends only on the angle to each texture axis, so it
+is tabulated per component as `σ_i(cos γ_i, E)`. The Debye-cone-averaged pole density — itself a
+function of `(cos γ, sin θ, cos α)` — is precomputed in a small 3-D table that also accelerates the
+sampler's plane selection. The tabulated oriented cross section reproduces the exact per-reflection
+value to ~0.1% (the linear pole-density tables assume a moderate March-Dollase `R`, as in typical
+fibre/plate textures).

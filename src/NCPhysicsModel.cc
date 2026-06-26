@@ -1088,6 +1088,8 @@ void NCP::CrystallineExtinction::setOrientation( const NCrystal::RotMatrix& crys
     m_normal_lab.push_back( n );
   }
   m_oriented = true;
+  buildConeTables();         //3-D cone-average table (used by the build below and the sampler)
+  buildOrientedXSTables();   //tabulate sigma_i(cos gamma, E) so calcCrossSectionDir is O(1)
 }
 
 double NCP::CrystallineExtinction::poleDensityAtQ( std::size_t i, const NC::Vector& Qhat ) const
@@ -1121,8 +1123,165 @@ double NCP::CrystallineExtinction::textureFactorDir( std::size_t i, const NC::Ve
   return sum / npsi;
 }
 
+double NCP::CrystallineExtinction::extinctionFactor( const HKLPlane& e, double wl ) const
+{
+  if ( !m_has_extinction ) return 1.0;
+  const double mu0 = 0.;
+  if ( m_model_option == 0 ) return uncorr_blk_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, mu0, m_Gg, m_L, m_tilt_dist_option );
+  if ( m_model_option == 1 ) return corr_blk_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, mu0, m_Gg, m_L );
+  if ( m_model_option == 2 ) return BC_pure_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
+  if ( m_model_option == 3 ) return BC_mix_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
+  return BC_mod_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
+}
+
+double NCP::CrystallineExtinction::coneAvgRaw( double cosGamma, double sinT, double cosAlpha,
+                                               const std::vector<double>& tab, unsigned npsi ) const
+{
+  //Debye-cone average of the single-component pole density. Using an orthonormal frame with
+  //the incident dir, Q.axis = sinT*cosGamma + cosT*sinGamma*cos(psi) (the azimuthal phase is
+  //irrelevant under the full-period average), so the cone average is a function of
+  //(cosGamma, sinT, cosAlpha) only -- this is what makes the 3-D tabulation exact.
+  if ( sinT > 1.0 ) return 0.0;
+  const double cosT = std::sqrt( std::max(0.0, 1.0 - sinT*sinT) );
+  const double sinG = std::sqrt( std::max(0.0, 1.0 - cosGamma*cosGamma) );
+  double sum = 0.0;
+  for ( unsigned j=0; j<npsi; ++j ) {
+    const double psi = NC::k2Pi * ( j + 0.5 ) / npsi;
+    const double QdotA = sinT * cosGamma + cosT * sinG * std::cos(psi);
+    sum += poleTabInterp( tab, QdotA, cosAlpha );
+  }
+  return sum / npsi;
+}
+
+void NCP::CrystallineExtinction::buildConeTables()
+{
+  m_coneTab1.clear(); m_coneTab2.clear();
+  if ( !m_has_texture ) return;
+  const unsigned NPSI = 64;
+  auto buildOne = [&]( const std::vector<double>& pole, std::vector<double>& cone ) {
+    cone.assign( NCG*NCT*NCA, 0.0 );
+    for ( int g=0; g<NCG; ++g ) {
+      const double cg = -1.0 + 2.0 * g / double(NCG-1);
+      for ( int t=0; t<NCT; ++t ) {
+        const double st = double(t) / double(NCT-1);
+        for ( int a=0; a<NCA; ++a ) {
+          const double ca = double(a) / double(NCA-1);
+          cone[ (g*NCT + t)*NCA + a ] = coneAvgRaw( cg, st, ca, pole, NPSI );
+        }
+      }
+    }
+  };
+  buildOne( m_poleTab1, m_coneTab1 );
+  if ( m_f2 > 0.0 ) buildOne( m_poleTab2, m_coneTab2 );
+}
+
+double NCP::CrystallineExtinction::coneTabInterp( const std::vector<double>& tab,
+                                                  double cosGamma, double sinT, double cosAlpha ) const
+{
+  //Trilinear over (cosGamma in [-1,1], sinT in [0,1], cosAlpha in [0,1]).
+  const double fg = NC::ncclamp( (cosGamma+1.0)*0.5, 0.0, 1.0 ) * (NCG-1);
+  const double ft = NC::ncclamp( sinT,     0.0, 1.0 ) * (NCT-1);
+  const double fa = NC::ncclamp( cosAlpha, 0.0, 1.0 ) * (NCA-1);
+  int ig=static_cast<int>(fg); if(ig>=NCG-1) ig=NCG-2;
+  int it=static_cast<int>(ft); if(it>=NCT-1) it=NCT-2;
+  int ia=static_cast<int>(fa); if(ia>=NCA-1) ia=NCA-2;
+  const double tg=fg-ig, tt=ft-it, ta=fa-ia;
+  auto V=[&](int g,int t,int a){ return tab[ (g*NCT+t)*NCA + a ]; };
+  const double c00=V(ig,it,ia)*(1-ta)+V(ig,it,ia+1)*ta;
+  const double c01=V(ig,it+1,ia)*(1-ta)+V(ig,it+1,ia+1)*ta;
+  const double c10=V(ig+1,it,ia)*(1-ta)+V(ig+1,it,ia+1)*ta;
+  const double c11=V(ig+1,it+1,ia)*(1-ta)+V(ig+1,it+1,ia+1)*ta;
+  const double c0=c00*(1-tt)+c01*tt, c1=c10*(1-tt)+c11*tt;
+  return c0*(1-tg)+c1*tg;
+}
+
+double NCP::CrystallineExtinction::textureFactorDirFast( std::size_t i, const NC::Vector& indir, double wl ) const
+{
+  //f-weighted cone-averaged texture factor of plane i for incident dir, via the 3-D cone table.
+  const double sinT = 0.5 * wl / m_hklPlanes[i].d_hkl;
+  if ( sinT > 1.0 ) return 0.0;
+  double P = m_f1 * coneTabInterp( m_coneTab1, indir.dot(m_axis1_lab), sinT, m_nDotA1[i] );
+  if ( m_f2 > 0.0 )
+    P += m_f2 * coneTabInterp( m_coneTab2, indir.dot(m_axis2_lab), sinT, m_nDotA2[i] );
+  return P;
+}
+
+void NCP::CrystallineExtinction::buildOrientedXSTables()
+{
+  m_dirTab1.clear(); m_dirTab2.clear();
+  if ( !m_has_texture || m_xsTabE.empty() || m_hklPlanes.empty() || m_coneTab1.empty() )
+    return;
+  const std::size_t NE = m_xsTabE.size();
+  m_nDotA1.resize( m_hklPlanes.size() );
+  if ( m_f2 > 0.0 ) m_nDotA2.resize( m_hklPlanes.size() );
+  for ( std::size_t i=0; i<m_hklPlanes.size(); ++i ) {
+    m_nDotA1[i] = std::abs( m_normal_lab[i].dot(m_axis1_lab) );
+    if ( m_f2 > 0.0 ) m_nDotA2[i] = std::abs( m_normal_lab[i].dot(m_axis2_lab) );
+  }
+  //Build g_i = sigma_i*ekin on a (cos gamma, E) grid using the cone table (trilinear lookup
+  //per plane instead of a Debye-cone average -> the build is fast).
+  auto buildOne = [&]( const NC::Vector& axis, const std::vector<double>& coneTab,
+                       const std::vector<double>& nDotA, std::vector<double>& out ) {
+    out.assign( NGAM*NE, 0.0 );
+    for ( int g=0; g<NGAM; ++g ) {
+      const double cg = -1.0 + 2.0 * g / double(NGAM-1);    //dir.axis at this grid point
+      for ( std::size_t ei=0; ei<NE; ++ei ) {
+        const double ekin = m_xsTabE[ei];
+        const double wl = NC::ekin2wl( ekin );
+        const double wlsq = NC::ncsquare( wl );
+        double xs = 0.0;
+        for ( std::size_t i=0; i<m_hklPlanes.size(); ++i ) {
+          auto& e = m_hklPlanes[i];
+          if ( wl > 2*e.d_hkl ) break;
+          const double sinT = 0.5 * wl / e.d_hkl;
+          xs += e.strength * extinctionFactor( e, wl ) * coneTabInterp( coneTab, cg, sinT, nDotA[i] );
+        }
+        out[ g*NE + ei ] = xs * 2.0 * wlsq * ekin;          //store g = sigma_i * ekin
+      }
+    }
+  };
+  buildOne( m_axis1_lab, m_coneTab1, m_nDotA1, m_dirTab1 );
+  if ( m_f2 > 0.0 ) buildOne( m_axis2_lab, m_coneTab2, m_nDotA2, m_dirTab2 );
+}
+
+double NCP::CrystallineExtinction::dirTabInterp( const std::vector<double>& tab,
+                                                 double cosGamma, double ekin ) const
+{
+  const std::size_t NE = m_xsTabE.size();
+  std::size_t j; double tE;
+  if ( ekin >= m_xsTabE.back() ) { j = NE-2; tE = 1.0; }     //asymptotic: use top column (g flat)
+  else {
+    auto it = std::upper_bound( m_xsTabE.begin(), m_xsTabE.end(), ekin );
+    j = static_cast<std::size_t>( ( it - m_xsTabE.begin() ) - 1 );
+    tE = ( ekin - m_xsTabE[j] ) / ( m_xsTabE[j+1] - m_xsTabE[j] );
+  }
+  double fg = NC::ncclamp( ( cosGamma + 1.0 ) * 0.5, 0.0, 1.0 ) * ( NGAM - 1 );
+  int ig = static_cast<int>( fg ); if ( ig >= NGAM-1 ) ig = NGAM-2;
+  const double tg = fg - ig;
+  const double g00=tab[ ig*NE + j ],     g01=tab[ ig*NE + j+1 ];
+  const double g10=tab[ (ig+1)*NE + j ], g11=tab[ (ig+1)*NE + j+1 ];
+  const double g0 = g00*(1-tg) + g10*tg;
+  const double g1 = g01*(1-tg) + g11*tg;
+  return ( g0*(1-tE) + g1*tE ) / ekin;
+}
+
 double NCP::CrystallineExtinction::calcCrossSectionDir( double neutron_ekin,
                                                         const NC::Vector& indir ) const
+{
+  if ( !m_oriented || !m_has_texture )
+    return calcCrossSection( neutron_ekin );   //no texture frame -> isotropic value
+  if ( !m_dirTab1.empty() ) {                  //tabulated O(1) path (see header)
+    if ( neutron_ekin <= m_xsTabE.front() ) return 0.0;
+    double sigma = m_f1 * dirTabInterp( m_dirTab1, indir.dot(m_axis1_lab), neutron_ekin );
+    if ( m_f2 > 0.0 )
+      sigma += m_f2 * dirTabInterp( m_dirTab2, indir.dot(m_axis2_lab), neutron_ekin );
+    return sigma;
+  }
+  return calcCrossSectionDirExact( neutron_ekin, indir );
+}
+
+double NCP::CrystallineExtinction::calcCrossSectionDirExact( double neutron_ekin,
+                                                             const NC::Vector& indir ) const
 {
   if ( !m_oriented || !m_has_texture )
     return calcCrossSection( neutron_ekin );   //no texture frame -> isotropic value
@@ -1183,7 +1342,7 @@ NCP::CrystallineExtinction::sampleScatteringEventDir( NC::RNG& rng, double neutr
       else if ( m_model_option == 3 ) E_hkl = BC_mix_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
       else                            E_hkl = BC_mod_extn_mdl( m_Nc, wl, e.F_hkl, m_l, e.d_hkl, m_Gg, m_L, m_tilt_dist_option, m_recipe );
     }
-    acc += e.strength * E_hkl * textureFactorDir( i, indir, wl );
+    acc += e.strength * E_hkl * textureFactorDirFast( i, indir, wl );
     cw.push_back( acc ); idx.push_back( i );
   }
   if ( acc <= 0.0 ) return result;   //no scattering (shouldn't happen if xs>0)
